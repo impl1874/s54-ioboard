@@ -9,14 +9,9 @@ int SW3=14;//GPIO14--D5
 int SW4=12;//GPIO12--D6
 int SW5=13;//GPIO13--D7
 
-byte STX = 0x7E;
-String CMD_SYNC_RECV = "7EA0";
-String CMD_SYNC_REPLY = "7E81";
-String CMD_CHECK_RECV = "7E0003000000";
-String CMD_CHECK_REPLY = "7EA3";
-
 byte variable[8];
 byte variableIndex = 0;
+byte sw_status;
 
 void setup()
 {
@@ -34,176 +29,211 @@ void setup()
 }
 
 void loop() {
-  while(Serial.available()) {
-    add_data(Serial.read());
-  }
+    while(Serial.available()){
+      variable[variableIndex++] = Serial.read();
+    }
+    handle_frame();
+    write_sw_status();
+    delay(10);
 }
 
-void add_data(byte data){
-  variable[variableIndex++] = data;
-  if (variable[0] != 0x7E) {
-    variableIndex = 0;
+//解析收到的数据
+void handle_frame(){
+  if (is_abort()) {
+    //过滤脏数据
+    abort_first();
     return;
   }
   if(variableIndex < 2){
     return;
   }
-  
-  for (int i = 1; i < sizeof(variable); i++) {
-    
-  }
-
-  variable_abort(variableIndex-sizeof(variable));
-  String str = bytes_2_hex_string(variable,variableIndex);
-  if (CMD_SYNC_RECV.equals(str)){
-    byte bytes[CMD_SYNC_REPLY.length()/2];
-    hex_string_2_bytes(bytes, sizeof(bytes) ,CMD_SYNC_REPLY);
-    for (int i = 0; i < sizeof(bytes); i++) {
-      Serial.write(bytes[i]&0xff);
-    }
-    variableIndex = 0;
-  } else if (CMD_CHECK_RECV.equals(str)){
-    byte bytes[CMD_CHECK_REPLY.length()/2];
-    hex_string_2_bytes(bytes, sizeof(bytes) ,CMD_CHECK_REPLY);
-    for (int i = 0; i < sizeof(bytes); i++) {
-      Serial.write(bytes[i]&0xff);
-    }
+  //ACK指令
+  if(is_ack()){
     variableIndex = 0;
   }
-}
-
-void variable_abort(int count){
-  if (count<=0){
-      return;
-  }
-  for (int i = 0; i < count; j++) {
-    for (int j = 0; i < sizeof(variable); j++) {
-      variable[j] = variable[j+1];
-      variable[j+1] = 0;
+  //同步指令
+  else if (is_sync()){
+    variableIndex = 0;
+    byte bytes[2];
+    bytes[0] = 0x7E;
+    bytes[1] = 0x81;
+    for (int i = 0; i < sizeof(bytes); i++) {
+      Serial.write(bytes[i]&0xFF);
     }
-    variableIndex--;
+  }
+  //自检指令
+  else if (is_self_check()){
+    variableIndex = 0;
+    sw_status = 0;
+    //ACK
+    {
+      byte bytes[2];
+      bytes[0] = 0x7E;
+      bytes[1] = 0xA3;
+      for (int i = 0; i < sizeof(bytes); i++) {
+        Serial.write(bytes[i]&0xFF);
+      }
+    }
+    //设备状态
+    {
+      byte bytes[6];
+      bytes[0] = 0x7E;
+      bytes[1] = 0x00;
+      bytes[2] = 0x03;
+      bytes[3] = 0xDF;//TODO重复发送标记
+      bytes[4] = sw_status;
+      bytes[5] = bytes[3] + bytes[4]%256;//完整性
+      for (int i = 0; i < sizeof(bytes); i++) {
+        Serial.write(bytes[i]&0xFF);
+      }
+    }
+  }
+  //初始化指令
+  else if (is_init()){
+    variableIndex = 0;
+    //ACK
+    {
+      byte bytes[2];
+      bytes[0] = 0x7E;
+      bytes[1] = 0x83;
+      for (int i = 0; i < sizeof(bytes); i++) {
+        Serial.write(bytes[i]&0xFF);
+      }
+    }
+    {
+      write_led();
+    }
+  }
+  //状态上报返回
+  else if (is_status_replay()){
+    variableIndex = 0;
+  }
+  //控制指令
+  else if (is_ctrol()){
+    variableIndex = 0;
+    //ACK
+    {
+      byte bytes[2];
+      bytes[0] = 0x7E;
+      bytes[1] = 0xA3;
+      for (int i = 0; i < sizeof(bytes); i++) {
+        Serial.write(bytes[i]&0xFF);
+      }
+    }
+    {
+      write_led();
+    }
   }
 }
 
-String bytes_2_hex_string(byte bytes[],int length) {
-  String str = "";
-  for (int i = 0; i < length; i++) {
-    char buffer[1];
-    sprintf(buffer, "%02x", bytes[i] & 0xFF);
-    str += String(buffer);
-  }
-  str.toUpperCase();
-  return str;
+//是否过滤脏数据
+boolean is_abort(){
+  return variable[0]&0xFF != 0x7E || variableIndex > 6;
 }
 
-void hex_string_2_bytes(byte bytes[],int length, String hex) {
-  String data = hex.substring(0,length*2);
-  for (int i = 0; i < length; i++) {
-      bytes[i] = (byte)hstol(data.substring(i * 2, i * 2 + 2));
-  }
+//ACK指令
+boolean is_ack(){
+  return variable[1] == 0xA3;
 }
 
-long hstol(String recv){
-  char c[recv.length() + 1];
-  recv.toCharArray(c, recv.length() + 1);
-  return strtol(c, NULL, 16); 
+//同步指令
+boolean is_sync(){
+  return variable[1] == 0xA0;
 }
 
+//自检指令
+boolean is_self_check(){
+  return variable[1] == 0x00 && variable[2] == 0x03 && variable[3] == 0x00 && variable[4] == 0x00 && variable[5] == 0x00;
+}
 
-// void loop()
-// {
-//   while (Serial.available() > 0) {
-//     byte b = Serial.read();
-//     variable[variableIndex++] = b;
-//   }
-//   if(variableIndex != 2){
-//     return;
-//   }
-//   if(variable[0] != STX){
-//     variableIndex = 0;
-//     return;
-//   }
-//   array_to_string(variable, 6, str);
-//   StrUID = str;
-  
-//   if (StrUID == CMD_SYNC_RECV) {
-//     Serial.write(STX);
-//     Serial.write(CMD_SYNC_REPLY);
-//   } else if(variable[1] == 0x00){
-//     if (variable[2] == 0x03){
-//       if(variable[3] == 0x00 || variable[4] == 0x00  || variable[5] == 0x00){
-//         // 自检
-//       Serial.write(STX);
-//       Serial.write(CMD_CHECK_REPLY);
-//      }else{
+//初始化指令
+boolean is_init(){
+  return variable[1] == 0x20 && variable[2] == 0x03 && variableIndex >= 6;
+}
+
+//状态上报返回
+boolean is_status_replay(){
+  return variable[1] == 0x83;
+}
+
+//控制指令
+boolean is_ctrol(){
+  return variable[1] == 0x00 && variable[2] == 0x03 && variableIndex >= 6;
+}
+
+//发送开关状态
+void write_sw_status(){
+  int new_sw = read_sw();
+    if(new_sw!=sw_status){
+      sw_status=new_sw;
+      byte bytes[6];
+      bytes[0] = 0x7E;
+      bytes[1] = 0x20;
+      bytes[2] = 0x03;
+      bytes[3] = 0xDF;//TODO重复发送标记
+      bytes[4] = sw_status;
+      bytes[5] = bytes[3] + bytes[4]%256;//完整性
+      for (int i = 0; i < sizeof(bytes); i++) {
+        Serial.write(bytes[i]&0xFF);
+      }
+    }
+}
+
+//读取开关状态
+int read_sw(){
+      int sw = 0;
+      if(digitalRead(SW1) == HIGH){
+        sw+=B1;
+      }
+      if(digitalRead(SW2) == HIGH){
+        sw+=B10;
+      }
+      if(digitalRead(SW3) == HIGH){
+        sw+=B100;
+      }
+      if(digitalRead(SW4) == HIGH){
+        sw+=B1000;
+      }
+      if(digitalRead(SW5) == HIGH){
+        sw+=B10000;
+      }
+      return sw;
+}
+
+//控制led灯
+void write_led(){
+  //LED1
+      if((variable[3]&0B1)==0B1){
+        digitalWrite(LED1,LOW);
+      } else{
+        digitalWrite(LED1,HIGH);
+      }
+   //LED2
+      if((variable[3]&0B10)==0B10){
+        digitalWrite(LED2,LOW);
+      } else{
+        digitalWrite(LED2,HIGH);
+      }
       
-//      }
-//     }
-//     delay(100);
-//     Serial.write(STX);
-//     Serial.write(0x00);
-//     Serial.write(0x03);
-//     Serial.write(0xFF);
-//     Serial.write(0x03);
-//     Serial.write(0x02);
-//   }
-//   variableIndex = 0;
-//  digitalWrite(LED1,LOW);
-//  delay(100);
-//  digitalWrite(LED1,HIGH);
-//  delay(100);
-//
-//  digitalWrite(LED2,LOW);
-//  delay(100);
-//  digitalWrite(LED2,HIGH);
-//  delay(100);
-//
-//  digitalWrite(LED3,LOW);
-//  delay(100);
-//  digitalWrite(LED3,HIGH);
-//  delay(100);
-//
-//  digitalWrite(LED4,LOW);
-//  delay(100);
-//  digitalWrite(LED4,HIGH);
-//  delay(100);
-//
-//  int sws1 = digitalRead(SW1);  
-//  int sws2 = digitalRead(SW2);
-//  int sws3 = digitalRead(SW3);
-//  int sws4 = digitalRead(SW4);
-//  int sws5 = digitalRead(SW5);
-  
-//  Serial.printf("%d%d%d%d%d\n", sws1,sws2,sws3,sws4,sws5);
-//Serial.print(78, HEX) 得到 "4E"
-//  Serial.swap();
-// }
-// char nibble2c(char c) 
-// { 
-//     if ((c>='0') && (c<='9')) 
-//      return c-'0' ; 
-//     if ((c>='A') && (c<='F')) 
-//      return c+10-'A' ; 
-//     if ((c>='a') && (c<='a')) 
-//      return c+10-'a' ; 
-//     return -1 ; 
-// } 
+   //LED3
+      if((variable[3]&0B100)==0B100){
+        digitalWrite(LED3,LOW);
+      } else{
+        digitalWrite(LED3,HIGH);
+      } 
+      
+   //LED4
+      if((variable[3]&0B1000)==0B1000){
+        digitalWrite(LED4,LOW);
+      } else{
+        digitalWrite(LED4,HIGH);
+      }  
+}
 
-// char hex2c(char c1, char c2) 
-// { 
-//     if(nibble2c(c2) >= 0) 
-//     return nibble2c(c1)*16+nibble2c(c2) ; 
-//     return nibble2c(c1) ; 
-// } 
-
-// String hex2str(char *data) 
-// { 
-//     String result = "" ; 
-//     for (int i=0 ; nibble2c(data[i])>=0 ; i++) 
-//     { 
-//      result += hex2c(data[i],data[i+1]) ; 
-//      if(nibble2c(data[i+1])>=0) 
-//      i++ ; 
-//     } 
-//     return result; 
-// } 
+//过滤脏数据
+void abort_first(){
+  for (int i = 0; i < variableIndex; i++) {
+      variable[i] = variable[i+1];
+  }
+  variableIndex--;
+}
